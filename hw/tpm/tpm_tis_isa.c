@@ -88,7 +88,7 @@ static void tpm_tis_isa_reset(DeviceState *dev)
     TPMStateISA *isadev = TPM_TIS_ISA(dev);
     TPMState *s = &isadev->state;
 
-    return tpm_tis_reset(s, true);
+    return tpm_tis_reset(s, false);
 }
 
 static const Property tpm_tis_isa_properties[] = {
@@ -131,8 +131,7 @@ static void tpm_tis_isa_realizefn(DeviceState *dev, Error **errp)
     memory_region_add_subregion(isa_address_space(ISA_DEVICE(dev)),
                                 TPM_TIS_ADDR_BASE, &s->mmio);
 
-    tpm_ppi_init(&s->ppi, isa_address_space(ISA_DEVICE(dev)),
-                 TPM_PPI_ADDR_BASE, OBJECT(dev));
+    /* PPI disabled: its RAM page at 0xFED45000 hangs OVMF under HVF on Intel Macs. */
 }
 
 static void build_tpm_tis_isa_aml(AcpiDevAmlIf *adev, Aml *scope)
@@ -172,7 +171,7 @@ static void tpm_tis_isa_class_init(ObjectClass *klass, const void *data)
     device_class_set_props(dc, tpm_tis_isa_properties);
     dc->vmsd  = &vmstate_tpm_tis_isa;
     tc->model = TPM_MODEL_TPM_TIS;
-    tc->ppi_enabled = true;
+    tc->ppi_enabled = false;
     dc->realize = tpm_tis_isa_realizefn;
     device_class_set_legacy_reset(dc, tpm_tis_isa_reset);
     tc->request_completed = tpm_tis_isa_request_completed;
