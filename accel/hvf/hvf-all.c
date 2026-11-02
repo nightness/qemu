@@ -9,6 +9,7 @@
  */
 
 #include "qemu/osdep.h"
+#include <sys/mman.h>
 #include "qemu/error-report.h"
 #include "qapi/error.h"
 #include "qapi/qapi-visit-common.h"
@@ -18,6 +19,7 @@
 #include "system/memory.h"
 #include "system/hvf.h"
 #include "system/hvf_int.h"
+#include "system/system.h"
 #include "hw/core/cpu.h"
 #include "hw/core/boards.h"
 #include "trace.h"
@@ -131,6 +133,15 @@ static void hvf_set_phys_mem(MemoryRegionSection *section, bool add)
                      flags & HV_MEMORY_READ ?  'R' : '-',
                      flags & HV_MEMORY_WRITE ? 'W' : '-',
                      flags & HV_MEMORY_EXEC ?  'X' : '-');
+    /*
+     * mlockall() returns ENOSYS on macOS, and left alone the host compresses
+     * guest RAM until every touch faults, so honour -overcommit mem-lock=on
+     * for each RAM mapping.
+     */
+    if (should_mlock(mlock_state) && memory_region_is_ram(area) &&
+        mlock(mem, size) < 0) {
+        error_report("hvf: mlock of guest RAM failed: %s", strerror(errno));
+    }
     ret = hv_vm_map(mem, gpa, size, flags);
     assert_hvf_ok(ret);
 }
