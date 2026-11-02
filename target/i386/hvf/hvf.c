@@ -685,7 +685,7 @@ void hvf_simulate_wrmsr(CPUX86State *env)
         init_tsc_freq(env);
         if (!env->tsc_khz) {
             x86_emul_raise_exception(env, EXCP0D_GPF, 0);
-            return 1;
+            break;
         }
         apic_set_tsc_deadline(APIC_COMMON(cpu->apic_state), data,
                               rdtscp() + rvmcs(cs->accel->fd, VMCS_TSC_OFFSET),
