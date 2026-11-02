@@ -840,53 +840,6 @@ bool hvf_simulate_wrmsr(CPUState *cs)
     return 0;
 }
 
-/* Exit profiling: per-reason VM exit counts, dumped to stderr every 10 s. BQL-protected. */
-#define EXITSTAT_N 80
-#define EXITSTAT_PAGES 16
-static uint64_t exitstat[EXITSTAT_N];
-static struct { uint64_t page, n; } exitstat_page[EXITSTAT_PAGES];
-static int64_t exitstat_last;
-
-static void exitstat_note_gpa(uint64_t gpa)
-{
-    uint64_t page = gpa >> 12;
-    int i;
-
-    for (i = 0; i < EXITSTAT_PAGES; i++) {
-        if (exitstat_page[i].page == page || !exitstat_page[i].n) {
-            exitstat_page[i].page = page;
-            exitstat_page[i].n++;
-            return;
-        }
-    }
-}
-
-static void exitstat_tick(uint64_t reason)
-{
-    int64_t now = g_get_monotonic_time();
-    int i;
-
-    exitstat[(reason & 0xffff) < EXITSTAT_N ? (reason & 0xffff) : 0]++;
-    if (now - exitstat_last < 10 * G_USEC_PER_SEC) {
-        return;
-    }
-    exitstat_last = now;
-    fprintf(stderr, "EXITS");
-    for (i = 0; i < EXITSTAT_N; i++) {
-        if (exitstat[i]) {
-            fprintf(stderr, " r%d=%llu", i, (unsigned long long)exitstat[i] / 10);
-        }
-        exitstat[i] = 0;
-    }
-    fprintf(stderr, " | EPT");
-    for (i = 0; i < EXITSTAT_PAGES && exitstat_page[i].n; i++) {
-        fprintf(stderr, " %llx000=%llu", (unsigned long long)exitstat_page[i].page,
-                (unsigned long long)exitstat_page[i].n / 10);
-        exitstat_page[i].n = 0;
-    }
-    fprintf(stderr, "\n");
-}
-
 static int hvf_handle_vmexit(CPUState *cpu)
 {
     X86CPU *x86_cpu = env_archcpu(cpu_env(cpu));
@@ -905,7 +858,6 @@ static int hvf_handle_vmexit(CPUState *cpu)
 
     bql_lock();
 
-    exitstat_tick(exit_reason);
     update_apic_tpr(cpu);
     current_cpu = cpu;
 
@@ -932,7 +884,6 @@ static int hvf_handle_vmexit(CPUState *cpu)
     {
         uint64_t gpa = rvmcs(cpu->accel->fd, VMCS_GUEST_PHYSICAL_ADDRESS);
 
-        exitstat_note_gpa(gpa);
         if (((idtvec_info & VMCS_IDT_VEC_VALID) == 0) &&
             ((exit_qual & EXIT_QUAL_NMIUDTI) != 0)) {
             vmx_set_nmi_blocking(cpu);

@@ -1,3 +1,5 @@
+# Reads the HAL timer list from a running guest over QMP. /tmp/addrs.txt holds
+# "symbol rva" lines from the public PDB of that exact ntoskrnl build.
 import sys,re
 sys.path.insert(0,'.')
 import vmctl
@@ -31,3 +33,6 @@ while p!=head and n<20:
     flags=rdq(p+0xb8)[0]&0xffffffff; freq=rdq(p+0xc0)[0]; caps=rdq(p+0xe0)[0]; typ=caps>>32; caps&=0xffffffff
     print(f"timer {p:#x} {'<-CLOCK ' if p==clk else ''}type={typ} caps={caps:#x} state={flags:#x} freq={freq}")
     p=d[0]; n+=1
+
+for n in ["HalpApicX2Mode","HalpInterruptX2ApicPolicy","HalpIommuX2ApicSupport"]:
+    print(n, hex(rdq(base+A[n])[0]&0xffffffff))

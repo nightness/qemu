@@ -1,69 +1,72 @@
 # Windows 11 x64 with a vTPM on an Intel Mac (QEMU + HVF)
 
-Work in progress. Target machine: 2017 MacBook Pro 15" (i7-7700HQ, 16 GB),
-macOS 15 via OpenCore Legacy Patcher, QEMU 11.1.3, swtpm 0.10.2.
+Target machine: 2017 MacBook Pro 15" (i7-7700HQ, 16 GB), macOS 15 via OpenCore
+Legacy Patcher, QEMU 11.1.3, swtpm 0.10.2, OVMF edk2-stable202608.
 
 ## Status
 
-Not finished. Windows reached the sign-in screen and accepted its password
-on an existing test install, but only with the workarounds below, and a
-clean install has not yet been done this way. The TPM is not fully working.
+Tested on one existing install: boots to SSH in 30-40 s, with Secure Boot on
+and a working TPM. A full unattended install from a blank disk, with none of
+the earlier workarounds, is still being validated.
 
-## Changes in this branch
+## Causes and fixes
 
-- `hw/tpm/tpm_tis_isa.c`: removes PPI. Without this, OVMF freezes at
-  `[TPM2PP] mPpi=FED45000` under HVF. A workaround, not an upstreamable fix.
-- `target/i386/hvf/hvf.c`: debug VM exit counters. Remove for real use.
-- `contrib/hvf-win11/`: VM launch script, CPU profile and QMP helpers.
-
-## Findings
-
-| Symptom | Cause | Action |
+| Symptom | Cause | Fix |
 |---|---|---|
-| Black screen | `-vga std` shows nothing under HVF on Intel | `-vga none -device ramfb` |
+| OVMF freezes at `[TPM2PP] mPpi=FED45000` | The 0x400-byte PPI region is not page-sized, so HVF leaves it unmapped and accesses reach its instruction emulator | `hw/tpm/tpm_ppi.c`: map a whole page |
+| TPM Event 15 (`0xC0000034`), `Get-Tpm` fails `0x80284001` | Observed without PPI; both cleared when PPI was restored | The PPI fix above |
+| Not ready for attestation | TPM state has no EK certificate | `swtpm_setup --create-ek-cert --create-platform-cert --lock-nvram` (done by `start.sh`) |
+| Very slow; HAL Event 17 | Windows only considers the APIC timer as its clock when CPUID leaf 0xA reports a PMU, so it used an HPET-backed virtual timer | `pmu=on` with `target/i386/hvf`: host leaf 0xA, PMU MSRs as non-counting registers |
+| Slow clock reads | Windows reads the HPET through VM exits when the hypervisor is visible | `+invtsc,-hypervisor` |
 | BSOD 0xA | `-cpu host` under HVF (UTM issue #2368) | `kabylake.env` CPU profile |
-| Slow clock reads, high idle CPU | Windows reads the HPET through VM exits when the hypervisor is visible | `+invtsc,-hypervisor` |
-| "Why did my PC restart?" | OOBE watchdog restarts setup 180 s after monitor event 103 while the UI is still working | See below |
+| Black screen | `-vga std` shows nothing under HVF on Intel | `-vga none -device ramfb` |
+| "Why did my PC restart?" | OOBE monitor restarts setup 180 s after monitor event 103 while the UI is still working | See below |
+| Secure Boot unavailable | QEMU's secure firmware requires SMM, which HVF lacks | `build-ovmf-secboot.sh`: `SECURE_BOOT_ENABLE=TRUE SMM_REQUIRE=FALSE` |
+| OpenSSH capability install hangs | Not determined; stalled twice at the same point | Install the signed Win32-OpenSSH MSI instead |
 
-`-hypervisor` measurements on the stuck OOBE screen, compared with the same
-profile with the hypervisor bit visible:
+Measured on the same disk, before and after the PMU change:
 
-| Measure | Visible | Hidden |
+| Measure | Before | After |
 |---|---|---|
-| QueryPerformanceCounter read | 133 us | about 1 us |
-| `Sleep(1)` | 135 ms | 31 ms |
-| Idle host CPU | about 80% | about 50% |
+| Boot to lock screen | about 8 min | about 90 s |
+| `Sleep(1)` under load | 188 ms | 18 ms |
+| 1M PowerShell loop | 2.7 s | 0.2 s |
+
+## How the clock cause was found
+
+`HalpTimerFindIdealClockSource` in `ntoskrnl.exe` only searches for a timer with
+the APIC's capabilities when `HalpProfileInterface` is not the default.
+`HalpInitializeProfiling` sets it only for GenuineIntel with CPUID leaf 0xA
+version >= 1, a non-zero event vector length and core cycles available. `kr.py`
+reads the registered timers and current clock from a running guest.
 
 ## OOBE watchdog
 
-`UserOOBE.dll` (OOBE Monitor, in `taskhostw`) logged
-`timer expired for event: 103` and ordered a restart 180-181 s after event
-103 on every run examined. See `C:\Windows\Panther\UnattendGC\setupact.log`.
+`UserOOBE.dll` logged `timer expired for event: 103` and ordered a restart
+180-181 s after event 103 on every failing run examined. See
+`C:\Windows\Panther\UnattendGC\setupact.log`. To re-run OOBE on a test install,
+set `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\OOBE\RecoveryOOBEEnabled`
+to 0 and reboot.
 
-One run passed with a Defender exclusion for `C:\` and the virtual network
-link down. Both were changed at once, so which one mattered is unknown.
+## Limitations
 
-To re-run OOBE without reinstalling, set
-`HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\OOBE\RecoveryOOBEEnabled` to
-0 and reboot. Do this on test installs only.
-
-## Known problems
-
-- TPM: Event 15 (status `0xC0000034`), `Get-Tpm` fails with `0x80284001`,
-  not ready for attestation. May relate to the PPI change; unproven.
-- HAL Event 17: the clock interrupt uses a platform timer instead of a
-  per-processor source.
-- HVF hides `tsc-deadline`, `invpcid`, `spec-ctrl` and `xsavec`, and caps
-  CPUID at leaf 0xD.
-- Secure Boot is off.
+- Guest profilers that use hardware counters get no samples.
+- Without SMM, a compromised guest kernel can write the UEFI variable flash, so
+  Secure Boot variables are not protected against it.
+- `build-ovmf-secboot.sh` enrolls keys with `virt-fw-vars --enroll-redhat`: Red
+  Hat's Platform Key, with Microsoft's keys for Windows.
+- x2APIC stays off: Windows requires an x2APIC-capable IOMMU or Hyper-V host, and
+  adding `intel-iommu,intremap=on` did not enable it in testing.
+- Windows does not use the TSC-deadline timer here. It is implemented because the
+  real CPU has it.
 
 ## Usage
 
-Build `qemu-system-x86_64`, copy it next to `start.sh` as
-`qemu-system-x86_64-tpmfix`, then:
+Build `qemu-system-x86_64` and copy it next to `start.sh` as
+`qemu-system-x86_64-tpmfix`. Run `build-ovmf-secboot.sh` in an arm64 Ubuntu 24.04
+container with `/out` mounted, and copy `OVMF_CODE.fd` and
+`OVMF_VARS.secboot.fd` to `fw/`. Then run `./start.sh`.
 
-    . ./kabylake.env && ./start.sh
-
-Replace the binary with `rm` then `cp`. Copying over it in place makes macOS
-kill it silently. `start.sh` attaches `autounattend.iso` when present; an
-answer file that wipes disk 0 will destroy the disk if booted from CD.
+Replace the binary with `rm` then `cp`. Copying over it in place makes macOS kill
+it silently. `start.sh` attaches `autounattend.iso` when present; an answer file
+that wipes disk 0 destroys the disk if booted from CD.
