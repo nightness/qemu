@@ -2,6 +2,8 @@
 # Windows 11 x64 VM on the MacBook (Intel i7, Apple Hypervisor): 6 threads, 8 GB RAM, 140 GB disk, virtual TPM 2.0.
 # From the Mac mini: ssh -J macbook -p 2222 nightness@localhost   |  RDP: localhost:3389 on the MacBook
 set -euo pipefail
+# swtpm_setup runs swtpm from PATH, which lacks Homebrew's prefix under launchd.
+export PATH=/usr/local/bin:$PATH
 cd "$(dirname "$0")"
 . ./kabylake.env
 # ACCEL=tcg selects pure emulation; the default is hvf.
