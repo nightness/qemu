@@ -30,7 +30,7 @@ exec ./qemu-system-x86_64-tpmfix -L /usr/local/share/qemu \
   -M "q35${MOPT:-}" "${ACC[@]}" -m 8G -overcommit mem-lock=on \
   -drive if=pflash,format=raw,readonly=on,file=${CODEFD:-fw/OVMF_CODE.fd} \
   -drive if=pflash,format=raw,file=${VARSFD:-vars.fd} \
-  ${EXTRA:-} -vga none -device ramfb -device qemu-xhci -device usb-kbd -device usb-tablet \
+  ${EXTRA:-} -vga none -device virtio-vga,xres=${XRES:-1440},yres=${YRES:-900} -device qemu-xhci -device usb-kbd -device usb-tablet \
   -drive file=disk.qcow2,if=none,id=hd0,format=qcow2,discard=unmap \
   -device nvme,drive=hd0,serial=winmbp,bootindex=${DISKBOOT:-0} \
   ${cd[@]+"${cd[@]}"} \
@@ -39,4 +39,4 @@ exec ./qemu-system-x86_64-tpmfix -L /usr/local/share/qemu \
   -tpmdev emulator,id=tpm0,chardev=chrtpm -device tpm-tis,tpmdev=tpm0 \
   -rtc base=localtime \
   -qmp unix:qmp.sock,server=on,wait=off \
-  -display cocoa,zoom-to-fit=on
+  -display cocoa,zoom-to-fit=on ${FULLSCREEN:+-full-screen}
