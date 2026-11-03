@@ -39,4 +39,4 @@ exec ./qemu-system-x86_64-tpmfix -L /usr/local/share/qemu \
   -tpmdev emulator,id=tpm0,chardev=chrtpm -device tpm-tis,tpmdev=tpm0 \
   -rtc base=localtime \
   -qmp unix:qmp.sock,server=on,wait=off \
-  -display cocoa,zoom-to-fit=on ${FULLSCREEN:+-full-screen}
+  -display cocoa,zoom-to-fit=on,hidpi=${HIDPI:-off} ${FULLSCREEN:+-full-screen}

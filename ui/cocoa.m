@@ -101,6 +101,7 @@ static int left_command_key_enabled = 1;
 static bool swap_opt_cmd;
 
 static CGInterpolationQuality zoom_interpolation = kCGInterpolationNone;
+static bool hidpi = true;
 static NSTextField *pauseLabel;
 
 static bool allow_events;
@@ -500,8 +501,9 @@ static CGEventRef handleTapEvent(CGEventTapProxy proxy, CGEventType type, CGEven
     [[self window] setContentAspectRatio:NSMakeSize(screen.width, screen.height)];
 
     if (!([[self window] styleMask] & NSWindowStyleMaskResizable)) {
-        CGFloat width = screen.width / [[self window] backingScaleFactor];
-        CGFloat height = screen.height / [[self window] backingScaleFactor];
+        CGFloat scale = hidpi ? [[self window] backingScaleFactor] : 1;
+        CGFloat width = screen.width / scale;
+        CGFloat height = screen.height / scale;
 
         [[self window] setContentSize:NSMakeSize(width, height)];
         [[self window] center];
@@ -561,8 +563,13 @@ static CGEventRef handleTapEvent(CGEventTapProxy proxy, CGEventType type, CGEven
 
     info.xoff = 0;
     info.yoff = 0;
-    info.width = frameSize.width * [[self window] backingScaleFactor];
-    info.height = frameSize.height * [[self window] backingScaleFactor];
+    if (hidpi) {
+        info.width = frameSize.width * [[self window] backingScaleFactor];
+        info.height = frameSize.height * [[self window] backingScaleFactor];
+    } else {
+        info.width = frameSize.width;
+        info.height = frameSize.height;
+    }
 
     qemu_console_set_ui_info(dcl.con, &info, TRUE);
 }
@@ -2003,6 +2010,10 @@ static void cocoa_display_init(DisplayState *ds, DisplayOptions *opts)
 
     if (opts->u.cocoa.has_zoom_interpolation && opts->u.cocoa.zoom_interpolation) {
         zoom_interpolation = kCGInterpolationLow;
+    }
+
+    if (opts->u.cocoa.has_hidpi) {
+        hidpi = opts->u.cocoa.hidpi;
     }
 
     create_initial_menus();
