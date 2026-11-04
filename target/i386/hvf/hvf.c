@@ -77,6 +77,66 @@
 #include "qemu/main-loop.h"
 #include "qemu/accel.h"
 #include "target/i386/cpu.h"
+#include <time.h>
+#include <stdatomic.h>
+
+/* TEMPORARY: per-exit-reason statistics (QEMU_HVF_EXIT_STATS=1). */
+static int hvf_stats_on = -1;
+static _Atomic uint64_t st_cnt[80], st_hold[80], st_wait[80];
+static _Atomic uint64_t st_gpa_page[256], st_gpa_cnt[256];
+static uint64_t st_last;
+static _Atomic uint64_t st_apic_cnt[256], st_apic_hold[256], st_apic_wr[256];
+static inline uint64_t st_now(void) { return clock_gettime_nsec_np(CLOCK_UPTIME_RAW); }
+static void st_gpa(uint64_t gpa)
+{
+    uint64_t pg = gpa >> 12;
+    unsigned h = (unsigned)((pg * 0x9E3779B97F4A7C15ull) >> 56);
+    for (int i = 0; i < 256; i++) {
+        unsigned j = (h + i) & 255;
+        uint64_t cur = atomic_load(&st_gpa_page[j]);
+        if (cur == pg + 1) { atomic_fetch_add(&st_gpa_cnt[j], 1); return; }
+        if (cur == 0) {
+            uint64_t z = 0;
+            if (atomic_compare_exchange_strong(&st_gpa_page[j], &z, pg + 1) || z == pg + 1) {
+                atomic_fetch_add(&st_gpa_cnt[j], 1); return;
+            }
+        }
+    }
+}
+static void st_dump(uint64_t now)
+{
+    double secs = (now - st_last) / 1e9;
+    fprintf(stderr, "HVFSTATS window %.1fs\n", secs);
+    for (int r = 0; r < 80; r++) {
+        uint64_t c = atomic_exchange(&st_cnt[r], 0), h = atomic_exchange(&st_hold[r], 0),
+                 w = atomic_exchange(&st_wait[r], 0);
+        if (c) {
+            fprintf(stderr, "HVFSTATS reason %2d: %8.0f/s hold %6.1f ms/s (avg %5.1f us) wait %6.1f ms/s\n",
+                    r, c / secs, h / 1e6 / secs, h / 1e3 / c, w / 1e6 / secs);
+        }
+    }
+    for (int k = 0; k < 8; k++) {
+        uint64_t best = 0; int bi = -1;
+        for (int i = 0; i < 256; i++) {
+            uint64_t c = atomic_load(&st_gpa_cnt[i]);
+            if (c > best) { best = c; bi = i; }
+        }
+        if (bi < 0) break;
+        fprintf(stderr, "HVFSTATS mmio page 0x%llx: %.0f/s\n",
+                (unsigned long long)((atomic_load(&st_gpa_page[bi]) - 1) << 12), best / secs);
+        atomic_store(&st_gpa_cnt[bi], 0);
+    }
+    for (int i = 0; i < 256; i++) { atomic_store(&st_gpa_page[i], 0); atomic_store(&st_gpa_cnt[i], 0); }
+    for (int i = 0; i < 256; i++) {
+        uint64_t c = atomic_exchange(&st_apic_cnt[i], 0), h = atomic_exchange(&st_apic_hold[i], 0),
+                 w = atomic_exchange(&st_apic_wr[i], 0);
+        if (c > secs * 50) {
+            fprintf(stderr, "HVFSTATS apic reg 0x%03x: %7.0f/s (%3.0f%% writes) hold %6.1f ms/s avg %5.1f us\n",
+                    i << 4, c / secs, 100.0 * w / c, h / 1e6 / secs, h / 1e3 / c);
+        }
+    }
+    st_last = now;
+}
 
 static Error *invtsc_mig_blocker;
 
@@ -831,7 +891,41 @@ int hvf_vcpu_exec(CPUState *cpu)
         rip = rreg(cpu->accel->fd, HV_X86_RIP);
         env->eflags = rreg(cpu->accel->fd, HV_X86_RFLAGS);
 
+        if (hvf_stats_on < 0) {
+            hvf_stats_on = getenv("QEMU_HVF_EXIT_STATS") != NULL;
+            st_last = st_now();
+        }
+        /*
+         * Local APIC accesses (xAPIC MMIO) are the most frequent exit for a
+         * Windows guest: decode the instruction before taking the BQL. The
+         * decoder only reads this vCPU's registers and guest RAM, and RAM is
+         * safe to read under RCU; only the APIC access itself needs the BQL.
+         */
+        struct x86_decode apic_decode;
+        bool apic_predecoded = false;
+        unsigned apic_reg = 0;
+        bool apic_write = false;
+        if (exit_reason == EXIT_REASON_EPT_FAULT &&
+            !(exit_qual & EPT_VIOLATION_INST_FETCH) &&
+            (exit_qual & (EPT_VIOLATION_DATA_READ | EPT_VIOLATION_DATA_WRITE))) {
+            uint64_t gpa = rvmcs(cpu->accel->fd, VMCS_GUEST_PHYSICAL_ADDRESS);
+
+            if ((gpa & ~0xfffULL) == APIC_DEFAULT_ADDRESS) {
+                apic_reg = (gpa & 0xfff) >> 4;
+                apic_write = exit_qual & EPT_VIOLATION_DATA_WRITE;
+                hvf_load_regs(cpu);
+                decode_instruction(env, &apic_decode);
+                apic_predecoded = true;
+            }
+        }
+
+        uint64_t st_t0 = hvf_stats_on ? st_now() : 0;
         bql_lock();
+        uint64_t st_t1 = hvf_stats_on ? st_now() : 0;
+        unsigned st_r = (unsigned)(exit_reason & 0xffff) < 80 ? (unsigned)(exit_reason & 0xffff) : 79;
+        if (hvf_stats_on && st_r == EXIT_REASON_EPT_FAULT) {
+            st_gpa(rvmcs(cpu->accel->fd, VMCS_GUEST_PHYSICAL_ADDRESS));
+        }
 
         update_apic_tpr(cpu);
         current_cpu = cpu;
@@ -864,6 +958,12 @@ int hvf_vcpu_exec(CPUState *cpu)
             if (((idtvec_info & VMCS_IDT_VEC_VALID) == 0) &&
                 ((exit_qual & EXIT_QUAL_NMIUDTI) != 0)) {
                 vmx_set_nmi_blocking(cpu);
+            }
+
+            if (apic_predecoded) {
+                exec_instruction(env, &apic_decode);
+                hvf_store_regs(cpu);
+                break;
             }
 
             slot = hvf_find_overlap_slot(gpa, 1);
@@ -1052,6 +1152,22 @@ int hvf_vcpu_exec(CPUState *cpu)
             break;
         default:
             error_report("%llx: unhandled exit %llx", rip, exit_reason);
+        }
+        if (hvf_stats_on) {
+            uint64_t st_t2 = st_now();
+            atomic_fetch_add(&st_cnt[st_r], 1);
+            atomic_fetch_add(&st_hold[st_r], st_t2 - st_t1);
+            atomic_fetch_add(&st_wait[st_r], st_t1 - st_t0);
+            if (apic_predecoded) {
+                atomic_fetch_add(&st_apic_cnt[apic_reg], 1);
+                atomic_fetch_add(&st_apic_hold[apic_reg], st_t2 - st_t1);
+                if (apic_write) {
+                    atomic_fetch_add(&st_apic_wr[apic_reg], 1);
+                }
+            }
+            if (cpu->cpu_index == 0 && st_t2 - st_last > 5000000000ull) {
+                st_dump(st_t2);
+            }
         }
     } while (ret == 0);
 
